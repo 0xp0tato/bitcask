@@ -98,30 +98,48 @@ Things a production-grade version would need that this one doesn't have:
 - **All log files are held open for the lifetime of the process.** Fine for a small number of files; a long-running database with heavy rotation would eventually want to open files on demand and cache/evict handles instead.
 
 ## Benchmarks
-
+ 
 ```
 BenchmarkPut-16    268700    4166 ns/op
 ```
-
+ 
 ~240,000 single-threaded writes/sec on an AMD Ryzen 7 5800H.
-
+ 
+### Bitcask vs. the naive approach
+ 
+To make the append-only design's payoff concrete, `naive/` implements the "obvious first attempt" at a persistent key-value store: keep everything in a map, and on every write, serialize the *entire* dataset back to disk from scratch (`json.Marshal` + `os.WriteFile`). Benchmarking both with a growing keyspace (2,000 unique keys):
+ 
+| Approach | ns/op | Relative |
+|---|---|---|
+| Naive (rewrite whole file per write) | 634,732 | baseline |
+| Bitcask (append-only) | 4,331 | **~146x faster** |
+ 
+The gap isn't a fixed constant — it widens as the dataset grows. The naive approach's write cost is **O(n)** in the size of the existing dataset, since every write re-serializes everything that came before it; Bitcask's is **O(1)**, since a write is always just one append plus one index update, regardless of how much data already exists. This is the core justification for Bitcask's design, and the actual motivation behind log-structured storage engines generally.
+ 
+Reproduce with:
+```
+go test ./naive/ -bench=BenchmarkNaivePut -run=^$ -benchtime=2000x
+go test ./naive/ -bench=BenchmarkBitcaskPutGrowing -run=^$ -benchtime=2000x
+```
+ 
 ## Usage
-
+ 
 ```go
 db, err := bitcask.Open("data/")
 if err != nil {
     log.Fatal(err)
 }
-
+ 
 err = db.Put([]byte("key"), []byte("value"))
 val, err := db.Get([]byte("key"))
 err = db.Delete([]byte("key"))
 err = db.Compact()
 ```
-
+ 
 ## Running tests
-
+ 
 ```
 go test ./...
 go test -bench=. -run=^$
 ```
+ 
